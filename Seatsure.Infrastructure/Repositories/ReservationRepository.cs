@@ -15,31 +15,31 @@ public class ReservationRepository : IReservationRepository
 
     public async Task<Reservation?> GetByIdAsync(Guid id)
     {
-        // TODO: Implement GetByIdAsync (including TicketType) using DbContext
-        throw new NotImplementedException();
+     var res = await _context.Reservations.Include(e=>e.TicketType).Where(e=>e.Id == id).FirstOrDefaultAsync();
+      return res;
     }
 
     public async Task<IEnumerable<Reservation>> GetByUserIdAsync(Guid userId)
     {
-        // TODO: Implement GetByUserIdAsync using DbContext
-        throw new NotImplementedException();
+        var res =await _context.Reservations.Where(e => e.User.Id == userId).ToListAsync();
+        return res;    
     }
 
     public async Task<IEnumerable<Reservation>> GetExpiredHoldsAsync()
     {
-        // TODO: Implement GetExpiredHoldsAsync using DbContext
-        throw new NotImplementedException();
+       var result = await _context.Reservations.Where(e => e.HoldExpiresAtUtc < DateTime.Now).ToListAsync();
+        return result;
     }
 
     public async Task AddAsync(Reservation reservation)
     {
-        // TODO: Implement AddAsync using DbContext
-        throw new NotImplementedException();
+        await _context.Reservations.AddAsync(reservation);
+        await SaveChangesAsync();
     }
 
     public async Task SaveChangesAsync()
     {
-        // TODO: Implement SaveChangesAsync using DbContext
-        throw new NotImplementedException();
+        await _context.SaveChangesAsync();
+      
     }
 }

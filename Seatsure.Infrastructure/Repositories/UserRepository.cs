@@ -15,25 +15,28 @@ public class UserRepository : IUserRepository
 
     public async Task<User?> GetByIdAsync(Guid id)
     {
-        // TODO: Implement GetByIdAsync using DbContext
-        throw new NotImplementedException();
-    }
+        var result = await _context.Users.Where(e=> e.Id == id).FirstOrDefaultAsync();
+
+        return result;
+            
+     }
 
     public async Task<User?> GetByEmailAsync(string email)
     {
-        // TODO: Implement GetByEmailAsync using DbContext
-        throw new NotImplementedException();
+        var result = await _context.Users.Where(e=> e.Email == email).FirstOrDefaultAsync();
+        return result;
+
     }
 
     public async Task AddAsync(User user)
     {
-        // TODO: Implement AddAsync using DbContext
-        throw new NotImplementedException();
+      await  _context.Users.AddAsync(user);
+        await SaveChangesAsync();
+            
     }
 
     public async Task SaveChangesAsync()
     {
-        // TODO: Implement SaveChangesAsync using DbContext
-        throw new NotImplementedException();
+        await _context.SaveChangesAsync();
     }
 }

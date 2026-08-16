@@ -15,25 +15,26 @@ public class TicketTypeRepository : ITicketTypeRepository
 
     public async Task<TicketType?> GetByIdAsync(Guid id)
     {
-        // TODO: Implement GetByIdAsync using DbContext
-        throw new NotImplementedException();
+
+        var result = await _context.TicketTypes.Where(e => e.Id == id).FirstOrDefaultAsync();
+
+        return result;
     }
 
     public async Task<IEnumerable<TicketType>> GetByEventIdAsync(Guid eventId)
     {
-        // TODO: Implement GetByEventIdAsync using DbContext
-        throw new NotImplementedException();
+        var result = await _context.TicketTypes.Where(e => e.EventId == eventId).ToListAsync();
+        return result;
     }
 
     public async Task AddAsync(TicketType ticketType)
     {
-        // TODO: Implement AddAsync using DbContext
-        throw new NotImplementedException();
+        await _context.TicketTypes.AddAsync(ticketType);
+        await SaveChangesAsync();
     }
 
     public async Task SaveChangesAsync()
     {
-        // TODO: Implement SaveChangesAsync using DbContext
-        throw new NotImplementedException();
+        await _context.SaveChangesAsync();
     }
 }
