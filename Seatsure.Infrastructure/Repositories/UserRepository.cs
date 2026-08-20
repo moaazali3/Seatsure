@@ -15,28 +15,16 @@ public class UserRepository : IUserRepository
 
     public async Task<User?> GetByIdAsync(Guid id)
     {
-        var result = await _context.Users.Where(e=> e.Id == id).FirstOrDefaultAsync();
-
-        return result;
-            
-     }
+        return await _context.Users.FirstOrDefaultAsync(e => e.Id == id);
+    }
 
     public async Task<User?> GetByEmailAsync(string email)
     {
-        var result = await _context.Users.Where(e=> e.Email == email).FirstOrDefaultAsync();
-        return result;
-
+        return await _context.Users.FirstOrDefaultAsync(e => e.Email == email);
     }
 
     public async Task AddAsync(User user)
     {
-      await  _context.Users.AddAsync(user);
-        await SaveChangesAsync();
-            
-    }
-
-    public async Task SaveChangesAsync()
-    {
-        await _context.SaveChangesAsync();
+        await _context.Users.AddAsync(user);
     }
 }

@@ -1,7 +1,7 @@
 using Seatsure.Application.DTOs.TicketTypes;
 using Seatsure.Application.Exceptions;
-using Seatsure.Application.Services.Interfaces;
 using Seatsure.Application.Repositories;
+using Seatsure.Application.Services.Interfaces;
 using Seatsure.Domain;
 
 namespace Seatsure.Application.Services;
@@ -10,11 +10,16 @@ internal sealed class TicketTypeService : ITicketTypeService
 {
     private readonly ITicketTypeRepository _ticketTypes;
     private readonly IEventRepository _events;
+    private readonly IUnitOfWork _unitOfWork;
 
-    public TicketTypeService(ITicketTypeRepository ticketTypes, IEventRepository events)
+    public TicketTypeService(
+        ITicketTypeRepository ticketTypes,
+        IEventRepository events,
+        IUnitOfWork unitOfWork)
     {
         _ticketTypes = ticketTypes;
         _events = events;
+        _unitOfWork = unitOfWork;
     }
 
     public async Task<IEnumerable<TicketTypeDto>> GetByEventIdAsync(Guid eventId)
@@ -38,7 +43,6 @@ internal sealed class TicketTypeService : ITicketTypeService
         var ev = await _events.GetByIdAsync(eventId)
             ?? throw new NotFoundException($"Event {eventId} was not found.");
 
-        // Ownership check — only the owning organizer may add ticket types (README §3.3).
         if (ev.OrganizerId != organizerId)
             throw new ForbiddenException("You can only add ticket types to events you own.");
 
@@ -48,11 +52,11 @@ internal sealed class TicketTypeService : ITicketTypeService
             Name = request.Name.Trim(),
             Price = request.Price,
             TotalQuantity = request.TotalQuantity,
-            AvailableQuantity = request.TotalQuantity // starts fully available
+            AvailableQuantity = request.TotalQuantity
         };
 
         await _ticketTypes.AddAsync(ticketType);
-        await _ticketTypes.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
         return ticketType.ToDto();
     }

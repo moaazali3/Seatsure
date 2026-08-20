@@ -15,26 +15,16 @@ public class TicketTypeRepository : ITicketTypeRepository
 
     public async Task<TicketType?> GetByIdAsync(Guid id)
     {
-
-        var result = await _context.TicketTypes.Where(e => e.Id == id).FirstOrDefaultAsync();
-
-        return result;
+        return await _context.TicketTypes.FirstOrDefaultAsync(e => e.Id == id);
     }
 
     public async Task<IEnumerable<TicketType>> GetByEventIdAsync(Guid eventId)
     {
-        var result = await _context.TicketTypes.Where(e => e.EventId == eventId).ToListAsync();
-        return result;
+        return await _context.TicketTypes.Where(e => e.EventId == eventId).ToListAsync();
     }
 
     public async Task AddAsync(TicketType ticketType)
     {
         await _context.TicketTypes.AddAsync(ticketType);
-        await SaveChangesAsync();
-    }
-
-    public async Task SaveChangesAsync()
-    {
-        await _context.SaveChangesAsync();
     }
 }

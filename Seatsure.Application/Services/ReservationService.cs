@@ -1,31 +1,30 @@
 using Seatsure.Application.DTOs.Reservations;
 using Seatsure.Application.Exceptions;
 using Seatsure.Application.Notifications;
-using Seatsure.Application.Services.Interfaces;
 using Seatsure.Application.Repositories;
+using Seatsure.Application.Services.Interfaces;
 using Seatsure.Domain;
 
 namespace Seatsure.Application.Services;
 
-/// <summary>
-/// The core of the system (README §4). Owns all reservation state transitions and the
-/// optimistic-concurrency handling that prevents overselling the last ticket.
-/// </summary>
 internal sealed class ReservationService : IReservationService
 {
     private const int HoldMinutes = 10;
 
     private readonly IReservationRepository _reservations;
     private readonly ITicketTypeRepository _ticketTypes;
+    private readonly IUnitOfWork _unitOfWork;
     private readonly IAvailabilityNotifier _notifier;
 
     public ReservationService(
         IReservationRepository reservations,
         ITicketTypeRepository ticketTypes,
+        IUnitOfWork unitOfWork,
         IAvailabilityNotifier notifier)
     {
         _reservations = reservations;
         _ticketTypes = ticketTypes;
+        _unitOfWork = unitOfWork;
         _notifier = notifier;
     }
 
@@ -34,15 +33,12 @@ internal sealed class ReservationService : IReservationService
         if (request.Quantity < 1)
             throw new ValidationException("Quantity must be at least 1.");
 
-        // Step 1: read the ticket type WITH its RowVersion (FindAsync returns a tracked entity).
         var ticketType = await _ticketTypes.GetByIdAsync(ticketTypeId)
             ?? throw new NotFoundException($"Ticket type {ticketTypeId} was not found.");
 
-        // Step 2: inventory check against the value we just read.
         if (request.Quantity > ticketType.AvailableQuantity)
             throw new ConflictException("Insufficient inventory for the requested quantity.");
 
-        // Step 3: decrement. EF will include the original RowVersion in the UPDATE's WHERE clause.
         ticketType.AvailableQuantity -= request.Quantity;
 
         var reservation = new Reservation
@@ -56,11 +52,9 @@ internal sealed class ReservationService : IReservationService
         };
         await _reservations.AddAsync(reservation);
 
-        // Step 4+5: single SaveChanges persists the decrement and the new hold atomically.
-        // If a concurrent request already changed the row, EF throws and we surface a 409.
         try
         {
-            await _reservations.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
         catch (ConflictException)
         {
@@ -86,15 +80,13 @@ internal sealed class ReservationService : IReservationService
         if (reservation.Status != ReservationStatus.Pending)
             throw new ConflictException($"Reservation cannot be confirmed from status {reservation.Status}.");
 
-        // A hold past its expiry is a losing confirm even if the sweeper hasn't run yet.
         if (reservation.HoldExpiresAtUtc < DateTime.UtcNow)
             throw new ConflictException("The hold has expired.");
 
         reservation.Status = ReservationStatus.Confirmed;
         reservation.ConfirmedAtUtc = DateTime.UtcNow;
-        await _reservations.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
-        // Availability is unchanged by confirm, but §3.6 lists it as a broadcast trigger.
         await _notifier.AvailabilityChangedAsync(reservation.TicketTypeId, reservation.TicketType.AvailableQuantity);
         return reservation.ToDto();
     }
@@ -107,13 +99,12 @@ internal sealed class ReservationService : IReservationService
         if (reservation.UserId != userId)
             throw new ForbiddenException("You can only cancel your own reservations.");
 
-        // Only active reservations hold inventory; guard prevents double-restore.
         if (reservation.Status is not (ReservationStatus.Pending or ReservationStatus.Confirmed))
             throw new ConflictException($"Reservation cannot be cancelled from status {reservation.Status}.");
 
         reservation.Status = ReservationStatus.Cancelled;
         reservation.TicketType.AvailableQuantity += reservation.Quantity;
-        await _reservations.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
         await _notifier.AvailabilityChangedAsync(reservation.TicketTypeId, reservation.TicketType.AvailableQuantity);
         return reservation.ToDto();
@@ -137,9 +128,8 @@ internal sealed class ReservationService : IReservationService
             reservation.TicketType.AvailableQuantity += reservation.Quantity;
         }
 
-        await _reservations.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
-        // Broadcast the restored availability per affected ticket type.
         foreach (var reservation in expired)
             await _notifier.AvailabilityChangedAsync(reservation.TicketTypeId, reservation.TicketType.AvailableQuantity);
 

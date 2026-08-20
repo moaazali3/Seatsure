@@ -1,8 +1,8 @@
 using Seatsure.Application.DTOs.Common;
 using Seatsure.Application.DTOs.Events;
 using Seatsure.Application.Exceptions;
-using Seatsure.Application.Services.Interfaces;
 using Seatsure.Application.Repositories;
+using Seatsure.Application.Services.Interfaces;
 using Seatsure.Domain;
 
 namespace Seatsure.Application.Services;
@@ -12,11 +12,16 @@ internal sealed class EventService : IEventService
     private const int MaxPageSize = 100;
     private readonly IEventRepository _events;
     private readonly IUserRepository _users;
+    private readonly IUnitOfWork _unitOfWork;
 
-    public EventService(IEventRepository events, IUserRepository users)
+    public EventService(
+        IEventRepository events,
+        IUserRepository users,
+        IUnitOfWork unitOfWork)
     {
         _events = events;
         _users = users;
+        _unitOfWork = unitOfWork;
     }
 
     public async Task<PagedResult<EventDto>> GetPublishedAsync(int page, int pageSize)
@@ -45,7 +50,6 @@ internal sealed class EventService : IEventService
         if (request.StartsAtUtc <= DateTime.UtcNow)
             throw new ValidationException("StartsAtUtc must be in the future.");
 
-        // Guard against a valid JWT whose user no longer exists.
         var organizer = await _users.GetByIdAsync(organizerId)
             ?? throw new NotFoundException("Organizer account was not found.");
         if (organizer.Role != UserRole.Organizer)
@@ -63,7 +67,7 @@ internal sealed class EventService : IEventService
         };
 
         await _events.AddAsync(ev);
-        await _events.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
         return ev.ToDto();
     }
@@ -73,18 +77,16 @@ internal sealed class EventService : IEventService
         var ev = await _events.GetByIdAsync(eventId)
             ?? throw new NotFoundException($"Event {eventId} was not found.");
 
-        // Ownership check — authz beyond role (README §6).
         if (ev.OrganizerId != organizerId)
             throw new ForbiddenException("You can only publish events you own.");
 
         if (ev.Status == EventStatus.Cancelled)
             throw new ConflictException("A cancelled event cannot be published.");
 
-        // Idempotent: republishing an already-published event is a no-op success.
         if (ev.Status != EventStatus.Published)
         {
             ev.Status = EventStatus.Published;
-            await _events.SaveChangesAsync();
+            await _unitOfWork.SaveChangesAsync();
         }
 
         return ev.ToDto();

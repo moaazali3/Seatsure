@@ -1,8 +1,8 @@
 using Seatsure.Application.DTOs.Auth;
 using Seatsure.Application.Exceptions;
+using Seatsure.Application.Repositories;
 using Seatsure.Application.Security;
 using Seatsure.Application.Services.Interfaces;
-using Seatsure.Application.Repositories;
 using Seatsure.Domain;
 
 namespace Seatsure.Application.Services;
@@ -12,12 +12,18 @@ internal sealed class AuthService : IAuthService
     private readonly IUserRepository _users;
     private readonly IPasswordHasher _hasher;
     private readonly ITokenService _tokens;
+    private readonly IUnitOfWork _unitOfWork;
 
-    public AuthService(IUserRepository users, IPasswordHasher hasher, ITokenService tokens)
+    public AuthService(
+        IUserRepository users,
+        IPasswordHasher hasher,
+        ITokenService tokens,
+        IUnitOfWork unitOfWork)
     {
         _users = users;
         _hasher = hasher;
         _tokens = tokens;
+        _unitOfWork = unitOfWork;
     }
 
     public async Task<UserDto> RegisterAsync(RegisterRequest request)
@@ -33,7 +39,6 @@ internal sealed class AuthService : IAuthService
         if (!Enum.IsDefined(request.Role))
             throw new ValidationException("Role is invalid.");
 
-        // 409 on duplicate email (README §3.1). Unique index on User.Email is the backstop.
         if (await _users.GetByEmailAsync(email) is not null)
             throw new ConflictException("Email is already registered.");
 
@@ -47,7 +52,7 @@ internal sealed class AuthService : IAuthService
         };
 
         await _users.AddAsync(user);
-        await _users.SaveChangesAsync();
+        await _unitOfWork.SaveChangesAsync();
 
         return new UserDto(user.Id, user.Name, user.Email, user.Role.ToString());
     }
@@ -57,7 +62,6 @@ internal sealed class AuthService : IAuthService
         var email = request.Email.Trim().ToLowerInvariant();
         var user = await _users.GetByEmailAsync(email);
 
-        // Same error whether the email is unknown or the password is wrong — don't leak which.
         if (user is null || !_hasher.Verify(request.Password, user.PasswordHash))
             throw new UnauthorizedException();
 
