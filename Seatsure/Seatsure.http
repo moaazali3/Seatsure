@@ -1,6 +1,112 @@
-@Seatsure_HostAddress = http://localhost:5149
+@host = http://localhost:5149
 
-GET {{Seatsure_HostAddress}}/weatherforecast/
-Accept: application/json
+### 1. Register Organizer
+# @name registerOrganizer
+POST {{host}}/api/auth/register
+Content-Type: application/json
 
-###
+{
+  "name": "Organizer User",
+  "email": "organizer@example.com",
+  "password": "Password123!",
+  "role": 0
+}
+
+### 2. Login Organizer
+# @name loginOrganizer
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "organizer@example.com",
+  "password": "Password123!"
+}
+
+@organizerToken = {{loginOrganizer.response.body.token}}
+
+### 3. Create Event (Organizer only)
+# @name createEvent
+POST {{host}}/api/events
+Authorization: Bearer {{organizerToken}}
+Content-Type: application/json
+
+{
+  "title": "Tech Conference 2026",
+  "description": "The best tech conference of the year.",
+  "venueName": "Convention Center",
+  "startsAtUtc": "2026-12-01T10:00:00Z"
+}
+
+@eventId = {{createEvent.response.body.id}}
+
+### 4. Add Ticket Type
+# @name addTicketType
+POST {{host}}/api/events/{{eventId}}/ticket-types
+Authorization: Bearer {{organizerToken}}
+Content-Type: application/json
+
+{
+  "name": "VIP Pass",
+  "price": 99.99,
+  "totalQuantity": 50
+}
+
+@ticketTypeId = {{addTicketType.response.body.id}}
+
+### 5. Publish Event
+POST {{host}}/api/events/{{eventId}}/publish
+Authorization: Bearer {{organizerToken}}
+
+### 6. Register Attendee
+# @name registerAttendee
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{
+  "name": "Attendee User",
+  "email": "attendee@example.com",
+  "password": "Password123!",
+  "role": 1
+}
+
+### 7. Login Attendee
+# @name loginAttendee
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "attendee@example.com",
+  "password": "Password123!"
+}
+
+@attendeeToken = {{loginAttendee.response.body.token}}
+
+### 8. List Published Events
+GET {{host}}/api/events?page=1&pageSize=10
+
+### 9. Get Event Detail
+GET {{host}}/api/events/{{eventId}}
+
+### 10. Create Hold (Reserve Ticket - returns 409 if oversold)
+# @name createHold
+POST {{host}}/api/ticket-types/{{ticketTypeId}}/reservations
+Authorization: Bearer {{attendeeToken}}
+Content-Type: application/json
+
+{
+  "quantity": 2
+}
+
+@reservationId = {{createHold.response.body.id}}
+
+### 11. Confirm Reservation
+POST {{host}}/api/reservations/{{reservationId}}/confirm
+Authorization: Bearer {{attendeeToken}}
+
+### 12. Cancel Reservation
+POST {{host}}/api/reservations/{{reservationId}}/cancel
+Authorization: Bearer {{attendeeToken}}
+
+### 13. My Reservations
+GET {{host}}/api/users/me/reservations
+Authorization: Bearer {{attendeeToken}}
