@@ -1,191 +1,205 @@
 # SeatSure — Real-Time Event Ticketing & Reservation Platform
-## Technical Blueprint 
 
-**Tech stack:** ASP.NET Core (.NET 8 LTS), EF Core + MSSQL, JWT Bearer auth, SignalR, `BackgroundService` for hold expiry, xUnit for testing. Docker is stretch-only (§9).
+SeatSure is a robust, concurrent event ticketing and reservation platform built with **ASP.NET Core (.NET 8 LTS)**, following **Clean Architecture** principles.
+
+The core mission of SeatSure is protecting a single, non-negotiable business invariant:
+> **A ticket type is never sold beyond its capacity — `AvailableQuantity` never goes negative, even under high concurrency and race conditions.**
 
 ---
 
-## 1. Domain Model
+## 📑 Table of Contents
+1. [Architecture Overview](#-architecture-overview)
+2. [Domain Model & Database Design](#-domain-model--database-design)
+3. [Concurrency & Inventory Protection](#-concurrency--inventory-protection)
+4. [API Endpoints Documentation](#-api-endpoints-documentation)
+5. [Real-Time Updates (SignalR)](#-real-time-updates-signalr)
+6. [Background Hold Expiration](#-background-hold-expiration)
+7. [Authentication & Authorization](#-authentication--authorization)
+8. [Setup & Running Locally](#-setup--running-locally)
+9. [Testing the Endpoints](#-testing-the-endpoints)
 
-### 1.1 Entities
+---
 
-| Entity | Purpose |
-|---|---|
-| `User` | Attendee or Organizer. Auth identity. |
-| `Event` | Owned by an Organizer. Has a venue name, start time, status. |
-| `TicketType` | Belongs to an Event (e.g. "General", "VIP"). Holds price and inventory. |
-| `Reservation` | A hold or confirmed purchase against a `TicketType`, made by a `User`. |
+## 🏛 Architecture Overview
 
-### 1.2 ER Diagram
+The system strictly follows **Clean Architecture** with a clear separation of concerns:
 
-```mermaid
-erDiagram
-    USER ||--o{ EVENT : organizes
-    USER ||--o{ RESERVATION : makes
-    EVENT ||--o{ TICKETTYPE : offers
-    TICKETTYPE ||--o{ RESERVATION : "reserved as"
-
-    USER {
-        int Id PK
-        string Name
-        string Email UK
-        string PasswordHash
-        string Role "Organizer|Attendee"
-        datetime CreatedAtUtc
-    }
-    EVENT {
-        int Id PK
-        int OrganizerId FK
-        string Title
-        string Description
-        string VenueName
-        datetime StartsAtUtc
-        string Status "Draft|Published|Cancelled"
-        datetime CreatedAtUtc
-    }
-    TICKETTYPE {
-        int Id PK
-        int EventId FK
-        string Name
-        decimal Price
-        int TotalQuantity
-        int AvailableQuantity
-        byte_array RowVersion "concurrency token"
-    }
-    RESERVATION {
-        int Id PK
-        int TicketTypeId FK
-        int UserId FK
-        int Quantity
-        string Status "Pending|Confirmed|Expired|Cancelled"
-        datetime HoldExpiresAtUtc
-        datetime CreatedAtUtc
-        datetime ConfirmedAtUtc "nullable"
-    }
+```
+├── Seatsure.Domain          # Pure entities, enums, zero external dependencies
+├── Seatsure.Application     # Use cases, interfaces, DTOs (records), service implementations
+├── Seatsure.Infrastructure  # EF Core DbContext, Repositories, JWT, BCrypt password hashing
+└── Seatsure (Web API)       # Controllers, Middlewares, SignalR Hub, BackgroundService, Program.cs
 ```
 
-### 1.3 Key constraints
-
-- `User.Email` — unique index.
-- `TicketType.AvailableQuantity` — never negative; enforced in application logic inside a transaction, not just a DB check constraint (the whole teaching point is *why* app-level enforcement + concurrency tokens are needed).
-- `TicketType.RowVersion` — SQLite: implemented as an EF Core concurrency token (`[Timestamp]`-equivalent via `IsRowVersion()` on a `byte[]`, or a manually incremented `int Version` column if the SQLite provider quirks make native rowversion awkward — decide and pin this in Session 5, see ADR note in §8).
-- `Reservation.Quantity` — must be ≥ 1, and ≤ the ticket type's available quantity at time of request.
-- Foreign keys: `Event.OrganizerId → User.Id`, `TicketType.EventId → Event.Id` (cascade delete), `Reservation.TicketTypeId → TicketType.Id`, `Reservation.UserId → User.Id`.
+### Dependency Inversion in Practice (DIP)
+- **Application Layer** defines the repository interfaces (`IEventRepository`, `ITicketTypeRepository`, `IReservationRepository`, `IUserRepository`, `IUnitOfWork`, `IAvailabilityNotifier`).
+- **Infrastructure & API Layers** provide the implementations (`EventRepository`, `UnitOfWork`, `SignalRAvailabilityNotifier`).
+- Dependencies always point **inward** toward the core domain.
 
 ---
 
-## 2. Architecture
+## 🗄 Domain Model & Database Design
+
+### Entities
+
+| Entity | Purpose | Key Attributes |
+|---|---|---|
+| `User` | Attendees and Organizers | `Id (Guid)`, `Name`, `Email (Unique)`, `PasswordHash`, `Role (Organizer/Attendee)` |
+| `Event` | Concerts/events created by Organizers | `Id`, `OrganizerId`, `Title`, `Description`, `VenueName`, `StartsAtUtc`, `Status (Draft/Published/Cancelled)` |
+| `TicketType` | Ticket tiers for events (e.g. VIP, General) | `Id`, `EventId`, `Name`, `Price`, `TotalQuantity`, `AvailableQuantity`, `RowVersion` |
+| `Reservation` | Temporary hold or confirmed ticket purchase | `Id`, `TicketTypeId`, `UserId`, `Quantity`, `Status (Pending/Confirmed/Expired/Cancelled)`, `HoldExpiresAtUtc` |
+
+### Reservation Lifecycle (State Machine)
 
 ```mermaid
-graph TD
-    Client["Client (.http file / Swagger UI / tiny demo HTML page)"] -->|HTTP + JWT| C["Controllers\nAuthController, EventsController, TicketTypesController, ReservationsController"]
-    Client -->|WebSocket| Hub["EventAvailabilityHub (SignalR)"]
-    C -->|DTO records in/out| S["ReservationService : IReservationService\n(concurrency + hold logic lives here)"]
-    C --> DB[("EF Core DbContext\nSQLite")]
-    S --> DB
-    S -.->|"broadcasts on change"| Hub
-    BG["HoldExpiryService : BackgroundService\n(scans every 30s)"] --> DB
-    BG -.->|"broadcasts on expiry"| Hub
+stateDiagram-v2
+    [*] --> Pending: Create Hold (10 min expiry)
+    Pending --> Confirmed: User confirms hold
+    Pending --> Cancelled: User cancels hold (Inventory restored)
+    Pending --> Expired: Background service expires (Inventory restored)
+    Confirmed --> Cancelled: User cancels confirmed ticket (Inventory restored)
+    Confirmed --> [*]
+    Cancelled --> [*]
+    Expired --> [*]
 ```
-
-**Explicitly not in scope for Core:** generic repository/UoW, MediatR/CQRS, microservices, message queues, Redis. If a Stretch trainee wants to swap `BackgroundService` polling for a queue-based approach, that's a written comparison exercise, not required code (same pattern as the original ADR-004).
-
-**One business rule, one service — the load-bearing lesson of Session 6 (was S5 in the old plan):** all reservation logic (create hold, confirm, cancel, expire) lives in `IReservationService`, injected into controllers. This is where the concurrency handling and the "why does this class exist" conversation happens.
 
 ---
 
-## 3. API Contract (frozen — same discipline as before: one contract, all trainees code against it)
+## ⚡ Concurrency & Inventory Protection
 
-### 3.1 Auth
+### Why Optimistic Concurrency (`RowVersion`)?
+Ticketing systems experience sudden spikes in traffic (e.g., ticket drops). 
+* **Pessimistic Locking** (`SELECT FOR UPDATE`) holds database locks across transactions, serializing requests, degrading throughput, and risking deadlocks under peak load.
+* **Optimistic Locking** (`RowVersion` byte array on `TicketType`) allows parallel reads and writes. The database verifies the row version on commit.
 
-| Operation | Method + Path | Success | Failure |
-|---|---|---|---|
-| Register | `POST /api/auth/register` | `201` | `400` validation, `409` email taken |
-| Login | `POST /api/auth/login` | `200` `{ token, expiresAtUtc }` | `401` |
+### How it works in SeatSure:
+1. `ReservationService` fetches the `TicketType` and verifies `Quantity <= AvailableQuantity`.
+2. `AvailableQuantity` is decremented in memory.
+3. EF Core includes `RowVersion` in the `UPDATE` SQL `WHERE` clause automatically:
+   ```sql
+   UPDATE TicketTypes 
+   SET AvailableQuantity = @newQty 
+   WHERE Id = @id AND RowVersion = @originalRowVersion;
+   ```
+4. If two users attempt to purchase the last ticket simultaneously, the second write encounters a mismatched `RowVersion` $\rightarrow$ EF Core throws `DbUpdateConcurrencyException`.
+5. The service intercepts this and surfaces a clean **`409 Conflict`** with RFC 7807 Problem Details: `"Someone booked first. Please retry."`
 
-### 3.2 Events
+---
 
-| Operation | Method + Path | Success | Failure |
-|---|---|---|---|
-| List published events | `GET /api/events?page=1&pageSize=10` | `200` paged envelope | `400` bad paging |
-| Get event | `GET /api/events/{id}` | `200` | `404` |
-| Create event (Organizer) | `POST /api/events` | `201` + `Location` | `400`, `401`, `403` |
-| Publish event (Organizer, owner only) | `POST /api/events/{id}/publish` | `200` | `404`, `403` |
+## 🚀 API Endpoints Documentation
 
-### 3.3 Ticket Types
+All errors are returned in standard **RFC 7807 Problem Details** (`application/problem+json`).
 
-| Operation | Method + Path | Success | Failure |
-|---|---|---|---|
-| List ticket types for event | `GET /api/events/{eventId}/ticket-types` | `200` | `404` event |
-| Add ticket type (Organizer, owner only) | `POST /api/events/{eventId}/ticket-types` | `201` | `400`, `403`, `404` |
+### 1. Authentication (`/api/auth`)
+| Method | Endpoint | Access | Description | Status Codes |
+|---|---|---|---|---|
+| `POST` | `/api/auth/register` | Public | Register an Attendee (`1`) or Organizer (`0`) | `201 Created`, `400 Bad Request`, `409 Conflict` (Email taken) |
+| `POST` | `/api/auth/login` | Public | Login with email and password to receive JWT | `200 OK` (`{ token, expiresAtUtc }`), `401 Unauthorized` |
 
-### 3.4 Reservations — the core of the project
+### 2. Events (`/api/events`)
+| Method | Endpoint | Access | Description | Status Codes |
+|---|---|---|---|---|
+| `GET` | `/api/events?page=1&pageSize=10` | Public | Paginated list of published events | `200 OK`, `400 Bad Request` |
+| `GET` | `/api/events/{id}` | Public | Event details including available ticket types | `200 OK`, `404 Not Found` |
+| `POST` | `/api/events` | Organizer | Create a new event draft | `201 Created`, `400 Bad Request`, `401 Unauthorized`, `403 Forbidden` |
+| `POST` | `/api/events/{id}/publish` | Organizer (Owner) | Publish an event draft | `200 OK`, `403 Forbidden` (Not owner), `404 Not Found`, `409 Conflict` |
 
-| Operation | Method + Path | Success | Failure |
-|---|---|---|---|
-| Create hold | `POST /api/ticket-types/{id}/reservations` `{ quantity }` | `201` Pending, `holdExpiresAtUtc` = now+10min | `400` bad quantity, `404`, **`409` insufficient inventory / concurrency conflict** |
-| Confirm reservation | `POST /api/reservations/{id}/confirm` | `200` Confirmed | `404`, `409` already expired/confirmed |
-| Cancel reservation | `POST /api/reservations/{id}/cancel` | `200` Cancelled, inventory restored | `404`, `403` not owner |
-| My reservations | `GET /api/users/me/reservations` | `200` | `401` |
+### 3. Ticket Types (`/api/events/{eventId}/ticket-types`)
+| Method | Endpoint | Access | Description | Status Codes |
+|---|---|---|---|---|
+| `GET` | `/api/events/{eventId}/ticket-types` | Public | Get all ticket tiers for an event | `200 OK`, `404 Not Found` |
+| `POST` | `/api/events/{eventId}/ticket-types` | Organizer (Owner) | Add a new ticket type (VIP, General, etc.) | `201 Created`, `400 Bad Request`, `403 Forbidden`, `404 Not Found` |
 
-**The `409` on create-hold is the whole point of the project.** Two concurrent requests for the last ticket: one wins (`201`), one loses (`409` with a clear Problem Details message), and inventory is never oversold. Every trainee must be able to demo this with two terminal windows / two Postman tabs firing at once.
+### 4. Reservations (`/api/ticket-types/...` & `/api/reservations/...`)
+| Method | Endpoint | Access | Description | Status Codes |
+|---|---|---|---|---|
+| `POST` | `/api/ticket-types/{id}/reservations` | Authenticated | Place a 10-minute hold on tickets | `201 Created`, `400 Bad Request`, `404 Not Found`, **`409 Conflict`** (Sold out / Concurrency loss) |
+| `POST` | `/api/reservations/{id}/confirm` | Authenticated (Owner) | Confirm a pending reservation | `200 OK`, `403 Forbidden`, `404 Not Found`, `409 Conflict` (Expired/Already confirmed) |
+| `POST` | `/api/reservations/{id}/cancel` | Authenticated (Owner) | Cancel reservation & restore inventory | `200 OK`, `403 Forbidden`, `404 Not Found`, `409 Conflict` |
+| `GET` | `/api/users/me/reservations` | Authenticated | List all reservations for the logged-in user | `200 OK`, `401 Unauthorized` |
 
-### 3.5 Conventions (unchanged from before)
+---
 
-camelCase JSON, UTC ISO-8601 with `Utc` suffix, `int` ids, RFC 7807 Problem Details for all errors, offset pagination envelope:
+## 📡 Real-Time Updates (SignalR)
 
+* **Hub Route:** `/hubs/events`
+* **Client Methods:**
+  * `JoinEvent(eventId)`: Join a group channel for a specific event.
+  * `LeaveEvent(eventId)`: Leave the event room.
+* **Server Broadcast Event:**
+  * `AvailabilityChanged(ticketTypeId, availableQuantity)`: Fired automatically on ticket hold creation, confirmation, cancellation, and background expiration.
+
+---
+
+## ⏱ Background Hold Expiration
+
+SeatSure includes a dedicated `BackgroundService`:
+* **Worker Class:** `HoldExpiryService`
+* **Schedule:** Runs every 30 seconds.
+* **Logic:** 
+  1. Resolves a scoped `IReservationService` via `IServiceScopeFactory`.
+  2. Queries for `Pending` reservations where `HoldExpiresAtUtc < DateTime.UtcNow`.
+  3. Transitions status to `Expired`, atomically increments `TicketType.AvailableQuantity`, and commits.
+  4. Broadcasts updated inventory counts over SignalR.
+
+---
+
+## 🔒 Authentication & Authorization
+
+* **Mechanism:** JWT Bearer tokens signed with HMAC-SHA256.
+* **Claims:**
+  * `sub`: User ID (`Guid`)
+  * `email`: User Email
+  * `role`: `Organizer` or `Attendee`
+* **Authorization Levels:**
+  1. **Role-based:** `[Authorize(Roles = "Organizer")]` on administrative routes.
+  2. **Resource-based / Ownership checks:** Service-layer verification that the logged-in organizer owns the event being modified/published.
+
+---
+
+## 💻 Setup & Running Locally
+
+### Prerequisites
+* [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or higher
+* SQL Server (LocalDB, SQL Express, or Docker MSSQL)
+
+### 1. Configure Connection String
+Edit `Seatsure/appsettings.json`:
 ```json
-{ "items": [...], "page": 1, "pageSize": 10, "totalCount": 42 }
+"ConnectionStrings": {
+  "DefaultConnection": "Server=.;Database=Seatsure;Trusted_Connection=True;TrustServerCertificate=True"
+}
 ```
 
-DTOs are `record`s; entities never cross the controller boundary — same rule, day one.
+### 2. Apply Migrations
+```bash
+dotnet ef database update --project Seatsure.Infrastructure --startup-project Seatsure
+```
 
-### 3.6 SignalR contract
+### 3. Run the Application
+```bash
+dotnet run --project Seatsure
+```
 
-Hub: `/hubs/events`
-
-- Client joins group `event-{eventId}` on connect (via a `JoinEvent(eventId)` hub method).
-- Server broadcasts `AvailabilityChanged(ticketTypeId, availableQuantity)` to the group whenever a hold is created, confirmed, cancelled, or expired.
-- No auth required to *view* availability (public); reservation actions still go through the authenticated REST API.
-
----
-
-## 4. Concurrency Design (the hard part — teach it explicitly)
-
-1. Read `TicketType` with its `RowVersion`/`Version`.
-2. Check `Quantity <= AvailableQuantity`.
-3. Decrement `AvailableQuantity`, save. EF Core includes the original `RowVersion` in the `WHERE` clause automatically.
-4. If another request modified the row first, EF Core throws `DbUpdateConcurrencyException` → service catches it → controller returns `409` with a Problem Details body explaining "someone booked first, please retry."
-5. Wrap steps 1–3 in a single `DbContext` SaveChanges call inside a service method — no separate read-then-write across two round trips without the token, or the lesson is lost.
-
-This single mechanism is the "explain this design decision" question every trainee should be able to answer in their explanation interview — same evidentiary role the old ADR-006/auth explanation played.
+* **Swagger UI:** `http://localhost:5149/swagger`
+* **SignalR Hub:** `http://localhost:5149/hubs/events`
 
 ---
 
-## 5. Background Service (Hold Expiry)
+## 🧪 Testing the Endpoints
 
-`HoldExpiryService : BackgroundService`:
-
-- Runs a loop, `await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken)` between scans.
-- Each scan: query `Reservations` where `Status == Pending && HoldExpiresAtUtc < DateTime.UtcNow`.
-- For each: set `Status = Expired`, restore `TicketType.AvailableQuantity += Quantity`, save, broadcast `AvailabilityChanged` via the SignalR hub.
-- Must use a scoped `IServiceScopeFactory` to resolve a fresh `DbContext` per scan (the standard `BackgroundService` + scoped-service gotcha — worth teaching explicitly, it trips up almost everyone the first time).
+A comprehensive, ready-to-run `.http` file is provided in [`Seatsure/Seatsure.http`](Seatsure/Seatsure.http). You can execute requests directly in VS Code (REST Client extension) or Visual Studio 2022.
 
 ---
 
-## 6. Auth Design
+## 🎯 Design Decisions & Trade-offs (FAQ for Discussions)
 
-- JWT Bearer, issued on login. Claims: `sub` (user id), `role` (`Organizer`/`Attendee`), `email`.
-- `[Authorize(Roles = "Organizer")]` on event/ticket-type creation endpoints.
-- Ownership check (not just role) on publish/edit: the organizer must own the event — this is a manual check in the service/controller, not something `[Authorize]` alone gives you. Same "authn vs authz vs ownership" lesson as the old plan's Session 7, just moved earlier since auth is now core, not stretch-only.
-- Password hashing: `ASP.NET Core Identity`'s hasher or a lightweight `BCrypt.Net` package — pick one and pin it in Session 4, don't leave it open.
+1. **Why `record` for DTOs and `class` for Entities?**
+   * DTOs represent immutable value objects during network transit; `record` provides concise declaration and structural equality.
+   * Entities possess database identity (`Id`) and require mutable state for EF Core change tracking.
 
----
+2. **Why not MediatR / CQRS?**
+   * For this domain scope, plain services provide explicit dependency flows, lower indirection, and minimal mental overhead while fully respecting Single Responsibility and Dependency Inversion.
 
-## 7. Testing Strategy (Session 8)
-
-- **Unit tests** on `IReservationService`: the 409-on-oversell case, the successful hold case, the expiry restores-inventory case. This is where the concurrency logic gets proven, not just demoed.
-- **Integration tests** (`WebApplicationFactory`): full create-event → add-ticket-type → reserve → confirm happy path; one negative test (reserve more than available → `409`).
-- Green `dotnet build` + `dotnet test` is the Session 8 checkpoint, same bar as before.
-
-
+3. **Why Custom Exceptions mapped via Middleware?**
+   * Keeping HTTP-agnostic exceptions (`NotFoundException`, `ConflictException`, `ValidationException`) in the Application layer allows the business logic to be invoked by HTTP controllers, background workers, or CLI tools without HTTP dependencies.
