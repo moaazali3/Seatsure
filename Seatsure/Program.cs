@@ -11,7 +11,7 @@ namespace Seatsure
 
             // Add application & infrastructure layers
             builder.Services.AddInfrastructure(builder.Configuration);
-            builder.Services.AddApplication(builder.Configuration);
+            builder.Services.AddApplication();
 
             builder.Services.AddControllers();
             // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle

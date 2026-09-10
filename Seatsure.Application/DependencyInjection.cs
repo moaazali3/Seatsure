@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Seatsure.Application.Notifications;
 using Seatsure.Application.Services;
@@ -8,7 +7,7 @@ namespace Seatsure.Application;
 
 public static class DependencyInjection
 {
-    public static IServiceCollection AddApplication(this IServiceCollection services, IConfiguration? configuration = null)
+    public static IServiceCollection AddApplication(this IServiceCollection services)
     {
         services.AddSingleton<IAvailabilityNotifier, NullAvailabilityNotifier>();
 
